@@ -14,9 +14,48 @@ FORBIDDEN_KEYWORDS = [
 
 WRITE_KEYWORDS = ["INSERT", "UPDATE", "DELETE"]
 
+# Prompt injection patterns — phrases that try to hijack the LLM prompt
+INJECTION_PATTERNS = [
+    r"ignore\s+(previous|all|above|prior)\s+(instructions?|rules?|prompts?|context)",
+    r"you\s+are\s+now\s+",
+    r"forget\s+(everything|all|your\s+instructions?)",
+    r"new\s+instructions?:",
+    r"system\s*prompt\s*:",
+    r"override\s+(instructions?|rules?|mode)",
+    r"act\s+as\s+(a\s+)?(different|new|another|unrestricted)",
+    r"do\s+not\s+follow",
+    r"disregard\s+(your|all|the)\s+(rules?|instructions?|guidelines?)",
+    r"jailbreak",
+    r"pretend\s+(you\s+are|to\s+be)",
+    r"<\s*system\s*>",
+    r"\[INST\]",
+    r"###\s*instruction",
+    # Raw SQL injection patterns in natural language questions
+    r"['\";]\s*(DROP|DELETE|TRUNCATE|INSERT|UPDATE|ALTER)\s+",
+    r"--\s*$",
+    r"/\*.*?\*/",
+]
+
 
 class ValidationError(Exception):
     pass
+
+
+class InjectionError(ValidationError):
+    pass
+
+
+def check_prompt_injection(question: str):
+    """
+    Detect prompt injection attempts in the user's question.
+    Raises InjectionError if suspicious patterns are found.
+    """
+    for pattern in INJECTION_PATTERNS:
+        if re.search(pattern, question, re.IGNORECASE):
+            raise InjectionError(
+                "Your question contains patterns that look like a prompt injection attempt.\n"
+                "Please rephrase as a plain database question (e.g. 'Show all customers from Mumbai')."
+            )
 
 
 def check_not_empty(sql: str):
@@ -68,17 +107,13 @@ def is_complex_query(sql: str) -> bool:
     return join_count >= 2 or has_subquery or has_having or is_long
 
 
-# Fix #5: Schema-aware table/column validation
-
 def extract_tables_from_sql(sql: str) -> Set[str]:
     """
-    Extract table names referenced in the SQL using sqlparse + regex fallback.
+    Extract table names referenced in the SQL using regex.
     Handles FROM, JOIN, INTO, UPDATE clauses.
     """
     tables: Set[str] = set()
-    sql_upper = sql.upper()
 
-    # Regex patterns for table extraction
     patterns = [
         r'\bFROM\s+([`"\[]?[\w]+[`"\]]?)',
         r'\bJOIN\s+([`"\[]?[\w]+[`"\]]?)',
@@ -89,7 +124,6 @@ def extract_tables_from_sql(sql: str) -> Set[str]:
     for pattern in patterns:
         for match in re.finditer(pattern, sql, re.IGNORECASE):
             name = match.group(1).strip('`"[]').lower()
-            # Filter out SQL keywords that might be caught
             if name not in {"select", "where", "set", "values", "returning"}:
                 tables.add(name)
 
@@ -97,13 +131,9 @@ def extract_tables_from_sql(sql: str) -> Set[str]:
 
 
 def extract_columns_from_sql(sql: str) -> Set[str]:
-    """
-    Extract column names from the SQL (best-effort).
-    Looks at SELECT list, WHERE conditions, SET clause.
-    """
+    """Extract column names from the SQL (best-effort)."""
     columns: Set[str] = set()
 
-    # SELECT col1, col2 or SELECT t.col
     select_match = re.search(r'\bSELECT\b(.*?)\bFROM\b', sql, re.IGNORECASE | re.DOTALL)
     if select_match:
         select_part = select_match.group(1)
@@ -111,19 +141,19 @@ def extract_columns_from_sql(sql: str) -> Set[str]:
             part = part.strip()
             if part == "*":
                 continue
-            # Handle table.column or column AS alias
             col = re.split(r'\s+AS\s+', part, flags=re.IGNORECASE)[0].strip()
             col = col.split(".")[-1].strip('`"[] ')
             if col and re.match(r'^\w+$', col):
                 columns.add(col.lower())
 
-    # WHERE col = / SET col =
     for pattern in [r'\bWHERE\b(.*?)(?:\bGROUP\b|\bORDER\b|\bLIMIT\b|\bHAVING\b|$)',
                     r'\bSET\b(.*?)\bWHERE\b']:
         match = re.search(pattern, sql, re.IGNORECASE | re.DOTALL)
         if match:
             clause = match.group(1)
-            for col_match in re.finditer(r'\b([\w]+)\s*(?:=|<>|<=|>=|!=|ILIKE|LIKE\b|IN\b)', clause, re.IGNORECASE):
+            for col_match in re.finditer(
+                r'\b([\w]+)\s*(?:=|<>|<=|>=|!=|ILIKE|LIKE\b|IN\b)', clause, re.IGNORECASE
+            ):
                 col = col_match.group(1).lower()
                 if col not in {"and", "or", "not", "is", "null", "true", "false",
                                "where", "set", "ilike", "like", "in", "between"}:
@@ -134,7 +164,7 @@ def extract_columns_from_sql(sql: str) -> Set[str]:
 
 def validate_against_schema(sql: str, schema: Dict[str, List[dict]]):
     """
-    Fix #5: Validate that tables and columns in the SQL exist in the schema.
+    Validate that tables and columns in the SQL exist in the schema.
     Raises ValidationError if hallucinated tables/columns are detected.
     """
     schema_tables = {t.lower(): t for t in schema.keys()}
@@ -143,7 +173,6 @@ def validate_against_schema(sql: str, schema: Dict[str, List[dict]]):
         for c in cols:
             all_columns.add(c["name"].lower())
 
-    # Check tables
     used_tables = extract_tables_from_sql(sql)
     unknown_tables = [t for t in used_tables if t not in schema_tables]
     if unknown_tables:
@@ -152,10 +181,8 @@ def validate_against_schema(sql: str, schema: Dict[str, List[dict]]):
             f"Available tables: {', '.join(schema_tables.keys())}"
         )
 
-    # Check columns (only if tables resolved — avoids false positives on *)
     if "*" not in sql:
         used_cols = extract_columns_from_sql(sql)
-        # Build column set for referenced tables only
         referenced_cols: Set[str] = set()
         for t in used_tables:
             original = schema_tables.get(t)
@@ -176,7 +203,7 @@ def validate(sql: str, schema: Dict[str, List[dict]] = None) -> str:
     Run all safety checks on the generated SQL.
     Allows SELECT, INSERT, UPDATE, DELETE.
     Blocks DROP, TRUNCATE, ALTER, etc.
-    If schema is provided, also validates tables/columns (fix #5).
+    If schema is provided, also validates tables/columns.
     """
     check_not_empty(sql)
     check_forbidden_keywords(sql)

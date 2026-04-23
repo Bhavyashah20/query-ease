@@ -71,11 +71,23 @@ def _print_stats(result: QueryResult):
     console.print()
 
 
-def print_error(message: str):
-    """Print an error message in a styled panel."""
+def print_error(message: str, hint: str = None):
+    """Print an error message in a styled panel, with an optional actionable hint."""
+    body = f"[red]{message}[/red]"
+    if hint:
+        body += f"\n\n[yellow]💡 {hint}[/yellow]"
     console.print(Panel(
-        f"[red]{message}[/red]",
+        body,
         title="[bold red]Error[/bold red]",
+        border_style="red"
+    ))
+
+
+def print_injection_error(message: str):
+    """Print a prompt injection warning panel."""
+    console.print(Panel(
+        f"[bold red]🚫 Blocked:[/bold red] [red]{message}[/red]",
+        title="[bold red]⚠ Prompt Injection Detected[/bold red]",
         border_style="red"
     ))
 

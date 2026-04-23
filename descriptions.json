@@ -1,0 +1,16 @@
+{
+  "_readme": "Rename this file to descriptions.json and fill in descriptions for your cryptic column names.",
+  "orders": {
+    "rev_amt":     "total revenue amount in rupees",
+    "cust_ref_id": "the customer who placed this order",
+    "flg_status":  "order status: 1=pending, 2=delivered, 3=cancelled"
+  },
+  "customers": {
+    "flg_active":  "1 if customer is active, 0 if churned",
+    "tier_cd":     "customer tier: G=Gold, S=Silver, B=Bronze"
+  },
+  "products": {
+    "sku_cd":      "unique product stock-keeping unit code",
+    "cat_id":      "product category foreign key"
+  }
+}
