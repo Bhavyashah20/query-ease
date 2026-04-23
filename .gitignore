@@ -78,3 +78,7 @@ dmypy.json
 # QueryEase specific
 *.sql
 !sample_data.sql
+schema_cache.json
+descriptions.json
+pagila/
+demo.cast
